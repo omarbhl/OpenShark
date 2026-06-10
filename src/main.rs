@@ -3,7 +3,7 @@ use image::ImageReader;
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoop};
 use tray_icon::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuEvent, MenuItem},
     Icon, TrayIconBuilder,
 };
 
@@ -27,6 +27,10 @@ fn main() -> Result<()> {
     let refresh_item = MenuItem::new("Refresh", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
 
+    let open_id = open_item.id().clone();
+    let refresh_id = refresh_item.id().clone();
+    let quit_id = quit_item.id().clone();
+
     let menu = Menu::new();
     menu.append(&open_item)?;
     menu.append(&refresh_item)?;
@@ -48,7 +52,7 @@ fn main() -> Result<()> {
                     .build()
                     .expect("Failed to create tray icon");
 
-                // Leak the tray so it stays alive for the lifetime of the app.
+                // Keep tray alive
                 Box::leak(Box::new(tray));
 
                 tray_created = true;
@@ -57,6 +61,20 @@ fn main() -> Result<()> {
             }
 
             _ => {}
+        }
+
+        // Process menu events
+        if let Ok(menu_event) = MenuEvent::receiver().try_recv() {
+            let id = menu_event.id;
+
+            if id == quit_id {
+                println!("Quit clicked.");
+                *control_flow = ControlFlow::Exit;
+            } else if id == refresh_id {
+                println!("Refresh clicked.");
+            } else if id == open_id {
+                println!("Open clicked.");
+            }
         }
     });
 }
