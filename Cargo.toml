@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+hidapi = "2"
 tray-icon = "0.19"
 tao = "0.30"
 muda = "0.15"
-image = { version = "0.25", default-features = false, features = ["ico"] }

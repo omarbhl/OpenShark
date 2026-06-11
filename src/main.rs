@@ -1,80 +1,170 @@
+mod icon;
+mod mouse;
+
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
-use image::ImageReader;
+use mouse::{ConnectionMode, MouseController, MouseStatus};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoop};
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem},
-    Icon, TrayIconBuilder,
+    TrayIcon, TrayIconBuilder,
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 
-fn load_icon(path: &str) -> Result<Icon> {
-    let img = ImageReader::open(path)?.decode()?.into_rgba8();
-    let (width, height) = img.dimensions();
+const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-    Ok(Icon::from_rgba(
-        img.into_raw(),
-        width,
-        height,
-    )?)
+struct TrayMenu {
+    mouse_name: MenuItem,
+    battery: MenuItem,
+    dpi: MenuItem,
+    settings: MenuItem,
+    exit: MenuItem,
+}
+
+impl TrayMenu {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            mouse_name: MenuItem::new("Mouse: scanning...", false, None),
+            battery: MenuItem::new("Battery: scanning...", false, None),
+            dpi: MenuItem::new("DPI: scanning...", true, None),
+            settings: MenuItem::new("Settings (soon)", false, None),
+            exit: MenuItem::new("Exit", true, None),
+        })
+    }
+
+    fn build_menu(&self) -> Result<Menu> {
+        let menu = Menu::new();
+        menu.append(&self.mouse_name)?;
+        menu.append(&self.battery)?;
+        menu.append(&self.dpi)?;
+        menu.append(&PredefinedMenuItem::separator())?;
+        menu.append(&self.settings)?;
+        menu.append(&PredefinedMenuItem::separator())?;
+        menu.append(&self.exit)?;
+        Ok(menu)
+    }
 }
 
 fn main() -> Result<()> {
     println!("OpenShark starting...");
 
     let event_loop = EventLoop::new();
-
-    let open_item = MenuItem::new("Open OpenShark", true, None);
-    let refresh_item = MenuItem::new("Refresh", true, None);
-    let quit_item = MenuItem::new("Quit", true, None);
-
-    let open_id = open_item.id().clone();
-    let refresh_id = refresh_item.id().clone();
-    let quit_id = quit_item.id().clone();
-
-    let menu = Menu::new();
-    menu.append(&open_item)?;
-    menu.append(&refresh_item)?;
-    menu.append(&quit_item)?;
-
-    let icon = load_icon("assets/icon.ico")?;
-
-    let mut tray_created = false;
+    let menu_items = TrayMenu::new()?;
+    let menu = menu_items.build_menu()?;
+    let exit_id = menu_items.exit.id().clone();
+    let dpi_id = menu_items.dpi.id().clone();
+    let mut mouse = MouseController::new()?;
+    let mut latest_status = mouse.refresh();
+    let mut next_refresh = Instant::now() + REFRESH_INTERVAL;
+    let mut tray: Option<TrayIcon> = None;
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        *control_flow = ControlFlow::WaitUntil(next_refresh);
 
         match event {
-            Event::NewEvents(StartCause::Init) if !tray_created => {
-                let tray = TrayIconBuilder::new()
-                    .with_tooltip("OpenShark")
+            Event::NewEvents(StartCause::Init) if tray.is_none() => {
+                match TrayIconBuilder::new()
+                    .with_tooltip(tooltip(&latest_status))
                     .with_menu(Box::new(menu.clone()))
-                    .with_icon(icon.clone())
+                    .with_icon(
+                        icon::battery_icon(latest_status.battery)
+                            .expect("failed to build tray icon"),
+                    )
                     .build()
-                    .expect("Failed to create tray icon");
-
-                // Keep tray alive
-                Box::leak(Box::new(tray));
-
-                tray_created = true;
-
-                println!("Tray initialized.");
+                {
+                    Ok(created_tray) => {
+                        tray = Some(created_tray);
+                        apply_status(&menu_items, tray.as_ref(), &latest_status);
+                        println!("Tray initialized.");
+                    }
+                    Err(error) => {
+                        eprintln!("Failed to create tray icon: {error}");
+                        *control_flow = ControlFlow::Exit;
+                    }
+                }
             }
-
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                latest_status = mouse.refresh();
+                apply_status(&menu_items, tray.as_ref(), &latest_status);
+                next_refresh = Instant::now() + REFRESH_INTERVAL;
+                *control_flow = ControlFlow::WaitUntil(next_refresh);
+            }
             _ => {}
         }
 
-        // Process menu events
-        if let Ok(menu_event) = MenuEvent::receiver().try_recv() {
+        while let Ok(menu_event) = MenuEvent::receiver().try_recv() {
             let id = menu_event.id;
 
-            if id == quit_id {
-                println!("Quit clicked.");
+            if id == exit_id {
+                println!("Exit clicked.");
                 *control_flow = ControlFlow::Exit;
-            } else if id == refresh_id {
-                println!("Refresh clicked.");
-            } else if id == open_id {
-                println!("Open clicked.");
+                return;
+            }
+
+            if id == dpi_id {
+                match mouse.cycle_dpi() {
+                    Ok(dpi) => {
+                        println!("DPI changed to {dpi}.");
+                        latest_status.dpi = dpi;
+                    }
+                    Err(error) => {
+                        eprintln!("Failed to cycle DPI: {error}");
+                    }
+                }
+
+                latest_status = mouse.refresh();
+                apply_status(&menu_items, tray.as_ref(), &latest_status);
+                next_refresh = Instant::now() + REFRESH_INTERVAL;
+                *control_flow = ControlFlow::WaitUntil(next_refresh);
             }
         }
     });
+}
+
+fn apply_status(menu: &TrayMenu, tray: Option<&TrayIcon>, status: &MouseStatus) {
+    menu.mouse_name.set_text(format!("Mouse: {}", status.name));
+    menu.battery.set_text(battery_label(status));
+    menu.dpi.set_text(if status.available {
+        format!("DPI: {} (click to cycle)", status.dpi)
+    } else {
+        "DPI: unavailable".to_string()
+    });
+    menu.dpi.set_enabled(status.available);
+    menu.settings.set_text("Settings (soon)");
+    menu.settings.set_enabled(false);
+
+    if let Some(tray) = tray {
+        if let Err(error) = tray.set_tooltip(Some(tooltip(status))) {
+            eprintln!("Failed to update tray tooltip: {error}");
+        }
+
+        match icon::battery_icon(status.battery) {
+            Ok(icon) => {
+                if let Err(error) = tray.set_icon(Some(icon)) {
+                    eprintln!("Failed to update tray icon: {error}");
+                }
+            }
+            Err(error) => eprintln!("Failed to build battery icon: {error}"),
+        }
+    }
+}
+
+fn battery_label(status: &MouseStatus) -> String {
+    let Some(percent) = status.battery else {
+        return if status.connection_mode == Some(ConnectionMode::Wired) {
+            "Battery: wired mode".to_string()
+        } else {
+            "Battery: unknown".to_string()
+        };
+    };
+
+    match status.remaining_hours {
+        Some(hours) => format!("Battery: {percent}% ({hours:.0}h remaining)"),
+        None => format!("Battery: {percent}%"),
+    }
+}
+
+fn tooltip(status: &MouseStatus) -> String {
+    format!("OpenShark\n{}\n{}", status.name, battery_label(status))
 }
