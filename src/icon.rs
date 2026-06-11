@@ -15,13 +15,7 @@ const DIGITS: [[[u8; 3]; 5]; 10] = [
     [[1, 1, 1], [1, 0, 1], [1, 1, 1], [0, 0, 1], [1, 1, 1]],
 ];
 
-const QUESTION: [[u8; 3]; 5] = [
-    [1, 1, 1],
-    [0, 0, 1],
-    [0, 1, 1],
-    [0, 0, 0],
-    [0, 1, 0],
-];
+const QUESTION: [[u8; 3]; 5] = [[1, 1, 1], [0, 0, 1], [0, 1, 1], [0, 0, 0], [0, 1, 0]];
 
 pub fn battery_icon(battery: Option<u8>) -> anyhow::Result<Icon> {
     let color = match battery {
@@ -58,7 +52,14 @@ fn draw_text(rgba: &mut [u8], text: &str, color: [u8; 4]) {
             continue;
         };
         let x = start_x + (index * (glyph_width + gap)) as i32;
-        draw_glyph(rgba, &DIGITS[digit as usize], x, start_y, scale as i32, color);
+        draw_glyph(
+            rgba,
+            &DIGITS[digit as usize],
+            x,
+            start_y,
+            scale as i32,
+            color,
+        );
     }
 }
 
@@ -82,8 +83,12 @@ fn draw_glyph(rgba: &mut [u8], glyph: &[[u8; 3]; 5], x: i32, y: i32, scale: i32,
 fn draw_rect_aa(rgba: &mut [u8], x: i32, y: i32, width: i32, height: i32, color: [u8; 4]) {
     for py in (y - 1)..=(y + height) {
         for px in (x - 1)..=(x + width) {
-            let fx = (x as f32 - px as f32).max(0.0).max(px as f32 - (x + width - 1) as f32);
-            let fy = (y as f32 - py as f32).max(0.0).max(py as f32 - (y + height - 1) as f32);
+            let fx = (x as f32 - px as f32)
+                .max(0.0)
+                .max(px as f32 - (x + width - 1) as f32);
+            let fy = (y as f32 - py as f32)
+                .max(0.0)
+                .max(py as f32 - (y + height - 1) as f32);
             let alpha = (1.0 - fx.max(fy)).clamp(0.0, 1.0);
 
             if alpha <= 0.0 {
@@ -104,7 +109,7 @@ fn blend_pixel(rgba: &mut [u8], x: i32, y: i32, color: [u8; 4], alpha: f32) {
     let a = alpha * (color[3] as f32 / 255.0);
     let inv = 1.0 - a;
 
-    rgba[offset]     = (color[0] as f32 * a + rgba[offset]     as f32 * inv) as u8;
+    rgba[offset] = (color[0] as f32 * a + rgba[offset] as f32 * inv) as u8;
     rgba[offset + 1] = (color[1] as f32 * a + rgba[offset + 1] as f32 * inv) as u8;
     rgba[offset + 2] = (color[2] as f32 * a + rgba[offset + 2] as f32 * inv) as u8;
     rgba[offset + 3] = ((a + rgba[offset + 3] as f32 / 255.0 * inv) * 255.0).min(255.0) as u8;

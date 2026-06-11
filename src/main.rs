@@ -67,6 +67,7 @@ fn main() -> Result<()> {
                 match TrayIconBuilder::new()
                     .with_tooltip(tooltip(&latest_status))
                     .with_menu(Box::new(menu.clone()))
+                    .with_menu_on_left_click(true)
                     .with_icon(
                         icon::battery_icon(latest_status.battery)
                             .expect("failed to build tray icon"),

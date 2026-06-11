@@ -125,7 +125,7 @@ impl MouseController {
 
     fn read_battery(&self) -> Result<Option<u8>> {
         for device in self.open_devices(ConnectionMode::Wireless) {
-            let mut buf = [0_u8; 64];
+            let mut buf = [0_u8; 128];
 
             let Ok(bytes_read) = device.read_timeout(&mut buf, 25) else {
                 continue;
@@ -249,7 +249,9 @@ impl ConnectionMode {
 }
 
 fn is_x11_device(device: &hidapi::DeviceInfo, mode: ConnectionMode) -> bool {
-    device.vendor_id() == VENDOR_ID && device.product_id() == mode.product_id()
+    device.vendor_id() == VENDOR_ID
+        && device.product_id() == mode.product_id()
+        && device.interface_number() == 2
 }
 
 fn dpi_report_variants(mode: ConnectionMode, stage: usize) -> Vec<Vec<u8>> {
@@ -281,23 +283,7 @@ fn dpi_report(mode: ConnectionMode, stage: usize) -> Vec<u8> {
     buffer[11] = 0x4b;
     buffer[12] = 0x75;
     buffer[13] = 0x81;
-    buffer[21] = 0x01;
     buffer[24] = (stage + 1) as u8;
-    buffer[25] = 0xff;
-    buffer[29] = 0xff;
-    buffer[33] = 0xff;
-    buffer[34] = 0xff;
-    buffer[35] = 0xff;
-    buffer[38] = 0xff;
-    buffer[39] = 0xff;
-    buffer[40] = 0xff;
-    buffer[42] = 0xff;
-    buffer[43] = 0xff;
-    buffer[44] = 0x40;
-    buffer[46] = 0xff;
-    buffer[47] = 0xff;
-    buffer[48] = 0xff;
-    buffer[49] = 0x02;
 
     update_dpi_stage_metadata(&mut buffer);
     let checksum = buffer[3..=49]
@@ -341,7 +327,7 @@ fn listen_for_battery(device: &HidDevice, tx: &mpsc::Sender<u8>) {
     let start = Instant::now();
 
     while start.elapsed() < Duration::from_secs(3) {
-        let mut buf = [0_u8; 64];
+        let mut buf = [0_u8; 128];
 
         match device.read_timeout(&mut buf, BATTERY_TIMEOUT_MS) {
             Ok(bytes_read) => {
