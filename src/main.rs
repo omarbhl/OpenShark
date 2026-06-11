@@ -153,9 +153,9 @@ fn apply_status(menu: &TrayMenu, tray: Option<&TrayIcon>, status: &MouseStatus) 
 fn battery_label(status: &MouseStatus) -> String {
     let Some(percent) = status.battery else {
         return if status.connection_mode == Some(ConnectionMode::Wired) {
-            "Battery: wired mode".to_string()
+            "Battery: Wired mode".to_string()
         } else {
-            "Battery: unknown".to_string()
+            "Battery: Unknown".to_string()
         };
     };
 
