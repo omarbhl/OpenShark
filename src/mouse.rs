@@ -11,8 +11,8 @@ const VENDOR_ID: u16 = 0x1d57;
 const PRODUCT_WIRELESS: u16 = 0xfa60;
 const PRODUCT_WIRED: u16 = 0xfa55;
 const WRITE_DELAY: Duration = Duration::from_millis(500);
-const BATTERY_TIMEOUT_MS: i32 = 1000;
 const FULL_BATTERY_HOURS: f32 = 80.0;
+const DOCKED_AFTER: Duration = Duration::from_secs(10);
 
 const DPI_STAGES: [u16; 6] = [800, 1600, 2400, 3200, 5000, 22000];
 
@@ -27,6 +27,8 @@ pub struct MouseStatus {
     pub name: String,
     pub connection_mode: Option<ConnectionMode>,
     pub battery: Option<u8>,
+    pub battery_last_seen: Option<Instant>,
+    pub docked: bool,
     pub remaining_hours: Option<f32>,
     pub dpi: u16,
     pub available: bool,
@@ -38,6 +40,7 @@ pub struct MouseController {
     battery_samples: Vec<(Instant, u8)>,
     battery_rx: Receiver<u8>,
     last_battery: Option<u8>,
+    last_battery_seen: Option<Instant>,
 }
 
 impl MouseController {
@@ -51,6 +54,7 @@ impl MouseController {
             battery_samples: Vec::new(),
             battery_rx,
             last_battery: None,
+            last_battery_seen: None,
         })
     }
 
@@ -61,6 +65,7 @@ impl MouseController {
 
         while let Ok(percent) = self.battery_rx.try_recv() {
             self.last_battery = Some(percent);
+            self.last_battery_seen = Some(Instant::now());
             self.push_battery_sample(percent);
         }
 
@@ -72,27 +77,24 @@ impl MouseController {
                 name: "Attack Shark X11 not found".to_string(),
                 connection_mode: None,
                 battery: None,
+                battery_last_seen: None,
+                docked: false,
                 remaining_hours: None,
                 dpi: self.current_dpi(),
                 available: false,
             };
         };
 
-        let battery = if device_info.mode == ConnectionMode::Wireless {
-            self.read_battery().ok().flatten().or(self.last_battery)
-        } else {
-            None
-        };
-
-        if let Some(percent) = battery {
-            self.last_battery = Some(percent);
-            self.push_battery_sample(percent);
-        }
+        let battery = self.last_battery;
 
         MouseStatus {
             name: device_info.name,
             connection_mode: Some(device_info.mode),
             battery,
+            battery_last_seen: self.last_battery_seen,
+            docked: self
+                .last_battery_seen
+                .is_some_and(|last_seen| last_seen.elapsed() >= DOCKED_AFTER),
             remaining_hours: self.remaining_hours(battery),
             dpi: self.current_dpi(),
             available: true,
@@ -121,22 +123,6 @@ impl MouseController {
 
     pub fn current_dpi(&self) -> u16 {
         DPI_STAGES[self.current_stage]
-    }
-
-    fn read_battery(&self) -> Result<Option<u8>> {
-        for device in self.open_devices(ConnectionMode::Wireless) {
-            let mut buf = [0_u8; 128];
-
-            let Ok(bytes_read) = device.read_timeout(&mut buf, 25) else {
-                continue;
-            };
-
-            if let Some(percent) = parse_battery_report(&buf[..bytes_read]) {
-                return Ok(Some(percent));
-            }
-        }
-
-        Ok(None)
     }
 
     fn send_dpi_to_any_path(&self, mode: ConnectionMode, stage: usize) -> Result<()> {
@@ -172,10 +158,7 @@ impl MouseController {
             .filter(|device| is_x11_device(device, mode))
             .filter_map(|device| match device.open_device(&self.api) {
                 Ok(device) => Some(device),
-                Err(error) => {
-                    eprintln!("Failed to open HID path for {:?}: {error}", mode);
-                    None
-                }
+                Err(_) => None,
             })
             .collect()
     }
@@ -213,24 +196,33 @@ impl MouseController {
 
     fn remaining_hours(&self, battery: Option<u8>) -> Option<f32> {
         let battery = battery?;
+        let rate = self.battery_rate_per_hour()?;
 
-        let Some(first_higher_sample) = self
-            .battery_samples
-            .iter()
-            .find(|(_, percent)| *percent > battery)
-        else {
-            return Some(FULL_BATTERY_HOURS * (battery as f32 / 100.0));
-        };
-
-        let latest = self.battery_samples.last()?;
-        let elapsed_hours = latest.0.duration_since(first_higher_sample.0).as_secs_f32() / 3600.0;
-        let consumed = (first_higher_sample.1 - latest.1) as f32;
-
-        if elapsed_hours > 0.0 && consumed > 0.0 {
-            return Some((battery as f32 / (consumed / elapsed_hours)).max(0.0));
+        if rate < 0.0 {
+            let drain = rate.abs();
+            if drain > 0.0 {
+                return Some((battery as f32 / drain).max(0.0));
+            }
+        } else if rate > 0.0 {
+            let remaining = (100.0 - battery as f32) / rate;
+            if remaining.is_finite() && remaining >= 0.0 {
+                return Some(remaining);
+            }
         }
 
         Some(FULL_BATTERY_HOURS * (battery as f32 / 100.0))
+    }
+
+    fn battery_rate_per_hour(&self) -> Option<f32> {
+        let first = self.battery_samples.first()?;
+        let last = self.battery_samples.last()?;
+        let elapsed_hours = last.0.duration_since(first.0).as_secs_f32() / 3600.0;
+        if elapsed_hours < 0.1 {
+            return None;
+        }
+
+        let delta = last.1 as f32 - first.1 as f32;
+        Some(delta / elapsed_hours)
     }
 }
 
@@ -302,44 +294,45 @@ fn dpi_report(mode: ConnectionMode, stage: usize) -> Vec<u8> {
 fn spawn_battery_listener(tx: mpsc::Sender<u8>) {
     thread::spawn(move || {
         loop {
-            match HidApi::new() {
-                Ok(api) => {
-                    for info in api
-                        .device_list()
-                        .filter(|device| is_x11_device(device, ConnectionMode::Wireless))
-                    {
-                        let Ok(device) = info.open_device(&api) else {
-                            continue;
-                        };
+            let Ok(api) = HidApi::new() else {
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            };
 
-                        listen_for_battery(&device, &tx);
-                    }
-                }
-                Err(error) => eprintln!("Battery listener failed to initialize HID API: {error}"),
-            }
+            let Some(info) = api
+                .device_list()
+                .find(|device| is_x11_device(device, ConnectionMode::Wireless))
+            else {
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            };
 
-            thread::sleep(Duration::from_secs(5));
+            let Ok(device) = info.open_device(&api) else {
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            };
+
+            listen_for_battery(&device, &tx);
+            thread::sleep(Duration::from_secs(1));
         }
     });
 }
 
 fn listen_for_battery(device: &HidDevice, tx: &mpsc::Sender<u8>) {
-    let start = Instant::now();
-
-    while start.elapsed() < Duration::from_secs(3) {
+    loop {
         let mut buf = [0_u8; 128];
 
-        match device.read_timeout(&mut buf, BATTERY_TIMEOUT_MS) {
+        match device.read(&mut buf) {
             Ok(bytes_read) => {
+                if bytes_read == 0 {
+                    continue;
+                }
+
                 if let Some(percent) = parse_battery_report(&buf[..bytes_read]) {
                     let _ = tx.send(percent);
-                    return;
                 }
             }
-            Err(error) => {
-                eprintln!("Battery listener read failed: {error}");
-                return;
-            }
+            Err(_) => return,
         }
     }
 }

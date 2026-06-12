@@ -8,5 +8,8 @@ anyhow = "1"
 hidapi = "2"
 tray-icon = "0.19"
 tao = "0.30"
-muda = "0.15"
 auto-launch = "0.6.0"
+resvg = "0.47"
+
+[build-dependencies]
+winresource = "0.1"
