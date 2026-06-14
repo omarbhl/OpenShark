@@ -5,6 +5,7 @@ mod mouse;
 
 use std::{
     env,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -58,6 +59,11 @@ impl TrayMenu {
 fn main() -> Result<()> {
     let auto_launch = create_autorun()?;
     let autorun_enabled = auto_launch.is_enabled().unwrap_or(false);
+    if autorun_enabled {
+        if let Err(error) = auto_launch.enable() {
+            eprintln!("Failed to refresh autorun entry: {error}");
+        }
+    }
 
     let event_loop = EventLoop::new();
     let menu_items = TrayMenu::new(autorun_enabled)?;
@@ -208,7 +214,7 @@ fn battery_freshness(last_seen: Option<Instant>) -> Option<String> {
 }
 
 fn create_autorun() -> Result<AutoLaunch> {
-    let app_path = env::current_exe()?;
+    let app_path = preferred_autorun_path()?;
     let app_path = app_path.to_string_lossy().into_owned();
     Ok(AutoLaunch::new(
         "OpenShark",
@@ -216,4 +222,21 @@ fn create_autorun() -> Result<AutoLaunch> {
         WindowsEnableMode::CurrentUser,
         &[] as &[&str],
     ))
+}
+
+fn preferred_autorun_path() -> Result<PathBuf> {
+    let current_exe = env::current_exe()?;
+
+    if cfg!(debug_assertions) {
+        if let Some(release_exe) = current_exe
+            .parent()
+            .and_then(|dir| dir.parent())
+            .map(|target_dir| target_dir.join("release").join("openshark.exe"))
+            .filter(|candidate| candidate.exists())
+        {
+            return Ok(release_exe);
+        }
+    }
+
+    Ok(current_exe)
 }

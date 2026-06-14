@@ -51,9 +51,9 @@ fn render_svg(svg: &[u8], margin: u32) -> anyhow::Result<Icon> {
 
 fn render_battery_percentage(battery: u8) -> anyhow::Result<Icon> {
     let color = match battery {
-        75..=100 => "rgb(31,150,84)",
-        50..=74 => "rgb(220,161,38)",
-        20..=49 => "rgb(207,57,49)",
+        51..=100 => "rgb(31,150,84)",
+        25..=50 => "rgb(220,161,38)",
+        0..=24 => "rgb(207,57,49)",
         _ => "rgb(98,108,122)",
     };
 
